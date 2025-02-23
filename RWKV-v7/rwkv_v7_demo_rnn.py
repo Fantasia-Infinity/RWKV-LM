@@ -2,10 +2,15 @@
 # The RWKV Language Model - https://github.com/BlinkDL/RWKV-LM
 ########################################################################################################
 
+# 设置numpy打印选项
 import numpy as np
 np.set_printoptions(precision=4, suppress=True, linewidth=200)
+
+# 导入必要的库
 import types, torch, copy, time
 from typing import List
+
+# 启用CUDA性能优化选项
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -16,6 +21,7 @@ torch._C._jit_set_autocast_mode(False)
 import torch.nn as nn
 from torch.nn import functional as F
 
+# 定义TorchScript相关别名
 MyModule = torch.jit.ScriptModule
 MyFunction = torch.jit.script_method
 MyStatic = torch.jit.script
@@ -26,29 +32,34 @@ MyStatic = torch.jit.script
 This will load RWKV-7 "Goose" x070 and inference in RNN-mode (slower than GPT-mode for prefilling)
 '''
 
+# 设置模型参数
 args = types.SimpleNamespace()
 
 # model download: https://huggingface.co/BlinkDL/rwkv-7-world
 
-args.MODEL_NAME = "/mnt/e/RWKV-Runner/models/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096"
+#args.MODEL_NAME = "/mnt/e/RWKV-Runner/models/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096"
+args.MODEL_NAME = "/home/featurize/work/models/rwkv-7-world/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096"
 
-args.n_layer = 12
-args.n_embd = 768
-args.vocab_size = 65536
-args.head_size = 64
+args.n_layer = 12      # 模型层数
+args.n_embd = 768      # 嵌入维度
+args.vocab_size = 65536 # 词表大小
+args.head_size = 64    # 注意力头大小
 
-prompt = "The Eiffel tower is in the city of"
-NUM_TRIALS = 3
-LENGTH_PER_TRIAL = 100
-TEMPERATURE = 1.0
-TOP_P = 0.0
+# 生成参数设置
+prompt = "我是一个"    # 提示词
+NUM_TRIALS = 3         # 生成次数
+LENGTH_PER_TRIAL = 100 # 每次生成的长度
+TEMPERATURE = 1.0      # 采样温度
+TOP_P = 0.0           # Top-p采样参数
 
+# 使用半精度浮点数
 # DTYPE = torch.bfloat16
-DTYPE = torch.half # better
+DTYPE = torch.half    # 更好的性能
 
 ########################################################################################################
 
 class RWKV_RNN(MyModule):
+    """RWKV模型的RNN实现"""
     def __init__(self, args):
         super().__init__()
         self.args = args
@@ -77,6 +88,12 @@ class RWKV_RNN(MyModule):
 
     @MyFunction
     def forward(self, token:int, state:List[torch.Tensor]):
+        """
+        模型前向传播
+        token: 输入token的id
+        state: 包含所有层的状态
+        返回: (输出logits, 新状态)
+        """
         with torch.no_grad(): 
             z = self.z
             x = z['emb.weight'][token]
@@ -110,6 +127,16 @@ class RWKV_RNN(MyModule):
 ########################################################################################################
 
 def time_mixing__(layer_id:int, H:int, N:int, x, x_prev, v_first, state, x_r, x_w, x_k, x_v, x_a, x_g, w0, w1, w2, a0, a1, a2, v0, v1, v2, g1, g2, k_k, k_a, r_k, kw, vw, rw, ow, ln_w, ln_b):
+    """
+    RWKV的时间混合层实现
+    layer_id: 当前层号
+    H: 注意力头数
+    N: 每个头的维度
+    x: 当前输入
+    x_prev: 上一时刻状态
+    v_first: 第一层的v值
+    state: 层状态
+    """
     xx = x_prev - x
     xr, xw, xk, xv, xa, xg = x+xx*x_r, x+xx*x_w, x+xx*x_k, x+xx*x_v, x+xx*x_a, x+xx*x_g
 
@@ -156,6 +183,12 @@ except:
 ########################################################################################################
 
 def channel_mixing__(x, x_prev, x_k, kw, vw):
+    """
+    RWKV的通道混合层实现
+    x: 当前输入
+    x_prev: 上一时刻状态
+    x_k, kw, vw: 模型参数
+    """
     xx = x_prev - x
     k = x + xx * x_k
     k = torch.relu(kw @ k) ** 2
@@ -169,6 +202,13 @@ except:
 
 @MyStatic
 def sample_logits(logits, temperature:float=1.0, top_p:float=1.0, top_k:int=0):
+    """
+    从logits中采样下一个token
+    logits: 模型输出的logits
+    temperature: 温度参数,控制采样随机性
+    top_p: 累积概率阈值
+    top_k: 保留概率最大的k个选项
+    """
     probs = F.softmax(logits.float(), dim=-1)
     sorted_probs, sorted_ids = torch.sort(probs, descending=True)
     
@@ -197,10 +237,15 @@ def sample_logits(logits, temperature:float=1.0, top_p:float=1.0, top_k:int=0):
 ########################################################################################################
 
 class RWKV_TOKENIZER():
+    """RWKV专用分词器实现"""
     table: list[list[list[bytes]]]
     good: list[set[int]]
     wlen: list[int]
     def __init__(self, file_name):
+        """
+        初始化分词器
+        file_name: 词表文件路径
+        """
         self.idx2token = {}
         sorted = [] # must be already sorted
         lines = open(file_name, "r", encoding="utf-8").readlines()
@@ -256,9 +301,11 @@ class RWKV_TOKENIZER():
         return b''.join(map(lambda i: self.idx2token[i], tokens))
 
     def encode(self, src: str):
+        """将文本转换为token序列"""
         return self.encodeBytes(src.encode("utf-8"))
 
     def decode(self, tokens):
+        """将token序列转换回文本"""
         return self.decodeBytes(tokens).decode('utf-8')
 
     def printTokens(self, tokens):
@@ -272,109 +319,111 @@ class RWKV_TOKENIZER():
             # print(repr(s), i)
         print()
 
-tokenizer = RWKV_TOKENIZER("rwkv_vocab_v20230424.txt")
-
-########################################################################################################
-
-print(f'\nUsing CUDA {str(DTYPE).replace("torch.","")}. Loading {args.MODEL_NAME} ...')
-model = RWKV_RNN(args)
-
-print(f'\nPrefilling prompt (note: using RNN mode to prefill is very inefficient)')
-
-init_state = [None for _ in range(args.n_layer * 3)]
-for i in range(args.n_layer): # state: 0=att_x_prev 1=att_kv 2=ffn_x_prev
-    init_state[i*3+0] = torch.zeros(args.n_embd, dtype=DTYPE, requires_grad=False, device="cuda")
-    init_state[i*3+1] = torch.zeros((args.n_embd // args.head_size, args.head_size, args.head_size), dtype=torch.float, requires_grad=False, device="cuda")
-    init_state[i*3+2] = torch.zeros(args.n_embd, dtype=DTYPE, requires_grad=False, device="cuda")
-
-for token in tokenizer.encode(prompt):
-    init_out, init_state = model.forward(token, init_state)
+# 主执行逻辑
+if __name__ == "__main__":
+    # 初始化模型和分词器
+    print(f'\nUsing CUDA {str(DTYPE).replace("torch.","")}. Loading {args.MODEL_NAME} ...')
+    model = RWKV_RNN(args)
+    tokenizer = RWKV_TOKENIZER("/home/featurize/work/coderepos/RWKV-LM/RWKV-v7/rwkv_vocab_v20230424.txt")
     
-probs = F.softmax(init_out.float(), dim=-1) # compute softmax in float (more accurate)
+    # 初始化模型状态
+    print(f'\nPrefilling prompt (note: using RNN mode to prefill is very inefficient)')
 
-print(f'\n{prompt}')
+    init_state = [None for _ in range(args.n_layer * 3)]
+    for i in range(args.n_layer): # state: 0=att_x_prev 1=att_kv 2=ffn_x_prev
+        init_state[i*3+0] = torch.zeros(args.n_embd, dtype=DTYPE, requires_grad=False, device="cuda")
+        init_state[i*3+1] = torch.zeros((args.n_embd // args.head_size, args.head_size, args.head_size), dtype=torch.float, requires_grad=False, device="cuda")
+        init_state[i*3+2] = torch.zeros(args.n_embd, dtype=DTYPE, requires_grad=False, device="cuda")
 
-_, indices = torch.topk(probs, 10) # print top-10 possibilities
-for i in range(len(indices)):
-    token_id = indices[i].item()
-    token = tokenizer.decode([token_id])
-    token_prob = probs[token_id].item()
-    print(token, f'[probability {token_prob:.2%}]')
-
-########################################################################################################
-
-for TRIAL in range(NUM_TRIALS):
-    print(f'\n\n--[ Trial {TRIAL} ]-----------------', prompt, end="")
-    all_tokens = []
-    out_last = 0
-    out, state = init_out.clone(), copy.deepcopy(init_state)
-
-    min_time = 1e10
-    min_time_all = 1e10
-
-    t000 = time.perf_counter()
-
-    for i in range(LENGTH_PER_TRIAL):
-        t00 = time.perf_counter()
-        token = sample_logits(out, TEMPERATURE, TOP_P)
-        all_tokens += [token]
-        try:
-            tmp = tokenizer.decode(all_tokens[out_last:])
-            if '\ufffd' not in tmp: # only print when we have a valid utf-8 string
-                print(tmp, end="", flush=True)
-                out_last = i + 1
-        except:
-            pass
-        t0 = time.perf_counter()
-
-        out, state = model.forward(token, state)
+    for token in tokenizer.encode(prompt):
+        init_out, init_state = model.forward(token, init_state)
         
-        torch.cuda.synchronize()
-        t1 = time.perf_counter()
-        min_time = min(min_time, t1 - t0)
-        min_time_all = min(min_time_all, t1 - t00)
-    
-    print(f'\n[ {round(1/min_time_all,2)} (real) / {round(1/min_time,2)} (ignore sampling & tokenizer) token/s = {round(time.perf_counter()-t000,3)}s ]', end='')
+    probs = F.softmax(init_out.float(), dim=-1) # compute softmax in float (more accurate)
 
-print('\n')
+    print(f'\n{prompt}')
 
-########################################################################################################
+    _, indices = torch.topk(probs, 10) # print top-10 possibilities
+    for i in range(len(indices)):
+        token_id = indices[i].item()
+        token = tokenizer.decode([token_id])
+        token_prob = probs[token_id].item()
+        print(token, f'[probability {token_prob:.2%}]')
 
-zero_state = [None for _ in range(args.n_layer * 3)]
-for i in range(args.n_layer): # state: 0=att_x_prev 1=att_kv 2=ffn_x_prev
-    zero_state[i*3+0] = torch.zeros(args.n_embd, dtype=DTYPE, requires_grad=False, device="cuda")
-    zero_state[i*3+1] = torch.zeros((args.n_embd // args.head_size, args.head_size, args.head_size), dtype=torch.float, requires_grad=False, device="cuda")
-    zero_state[i*3+2] = torch.zeros(args.n_embd, dtype=DTYPE, requires_grad=False, device="cuda")
+    ########################################################################################################
 
-import json, math
-with open(f"misc/lambada_test.jsonl", "r", encoding="utf-8") as f:
-    todo = [json.loads(line) for line in f]
-    todo = [[doc['text'].rsplit(' ', 1)[0], " " + doc['text'].rsplit(' ', 1)[1]] for doc in todo]
+    # 多次生成文本
+    for TRIAL in range(NUM_TRIALS):
+        print(f'\n\n--[ Trial {TRIAL} ]-----------------', prompt, end="")
+        all_tokens = []
+        out_last = 0
+        out, state = init_out.clone(), copy.deepcopy(init_state)
 
-print('\nCheck LAMBADA... (RNN mode is very slow for this)')
-xsum = 0
-xcnt = 0
-xacc = 0
-for d in todo:
-    src = [0] + tokenizer.encode(d[0])
-    dst = tokenizer.encode(d[1])
+        min_time = 1e10
+        min_time_all = 1e10
 
-    logits = 0
-    correct = True
-    
-    state = copy.deepcopy(zero_state)
-    for token in src:
-        out, state = model.forward(token, state)
+        t000 = time.perf_counter()
 
-    for i in range(len(dst)):
-        probs = F.softmax(out.float(), dim=-1)
-        logits += math.log(probs[dst[i]])
-        if torch.argmax(probs).item() != dst[i]:
-            correct = False
-        out, state = model.forward(dst[i], state)
+        for i in range(LENGTH_PER_TRIAL):
+            t00 = time.perf_counter()
+            token = sample_logits(out, TEMPERATURE, TOP_P)
+            all_tokens += [token]
+            try:
+                tmp = tokenizer.decode(all_tokens[out_last:])
+                if '\ufffd' not in tmp: # only print when we have a valid utf-8 string
+                    print(tmp, end="", flush=True)
+                    out_last = i + 1
+            except:
+                pass
+            t0 = time.perf_counter()
 
-    xcnt += 1
-    xsum += logits
-    xacc += 1 if correct else 0
-    if xcnt % 10 == 0 or xcnt == len(todo):
-        print(xcnt, 'ppl', round(math.exp(-xsum / xcnt), 2), 'acc', round(xacc/xcnt*100, 2))
+            out, state = model.forward(token, state)
+            
+            torch.cuda.synchronize()
+            t1 = time.perf_counter()
+            min_time = min(min_time, t1 - t0)
+            min_time_all = min(min_time_all, t1 - t00)
+        
+        print(f'\n[ {round(1/min_time_all,2)} (real) / {round(1/min_time,2)} (ignore sampling & tokenizer) token/s = {round(time.perf_counter()-t000,3)}s ]', end='')
+
+    print('\n')
+
+    # ########################################################################################################
+
+    # zero_state = [None for _ in range(args.n_layer * 3)]
+    # for i in range(args.n_layer): # state: 0=att_x_prev 1=att_kv 2=ffn_x_prev
+    #     zero_state[i*3+0] = torch.zeros(args.n_embd, dtype=DTYPE, requires_grad=False, device="cuda")
+    #     zero_state[i*3+1] = torch.zeros((args.n_embd // args.head_size, args.head_size, args.head_size), dtype=torch.float, requires_grad=False, device="cuda")
+    #     zero_state[i*3+2] = torch.zeros(args.n_embd, dtype=DTYPE, requires_grad=False, device="cuda")
+
+    # import json, math
+    # with open(f"/home/featurize/work/coderepos/RWKV-LM/RWKV-v7/misc/lambada_test.jsonl", "r", encoding="utf-8") as f:
+    #     todo = [json.loads(line) for line in f]
+    #     todo = [[doc['text'].rsplit(' ', 1)[0], " " + doc['text'].rsplit(' ', 1)[1]] for doc in todo]
+
+    # print('\nCheck LAMBADA... (RNN mode is very slow for this)')
+    # xsum = 0
+    # xcnt = 0
+    # xacc = 0
+    # for d in todo:
+    #     src = [0] + tokenizer.encode(d[0])
+    #     dst = tokenizer.encode(d[1])
+
+    #     logits = 0
+    #     correct = True
+        
+    #     state = copy.deepcopy(zero_state)
+    #     for token in src:
+    #         out, state = model.forward(token, state)
+
+    #     for i in range(len(dst)):
+    #         probs = F.softmax(out.float(), dim=-1)
+    #         logits += math.log(probs[dst[i]])
+    #         if torch.argmax(probs).item() != dst[i]:
+    #             correct = False
+    #         out, state = model.forward(dst[i], state)
+
+    #     xcnt += 1
+    #     xsum += logits
+    #     xacc += 1 if correct else 0
+    #     if xcnt % 10 == 0 or xcnt == len(todo):
+    #         print(xcnt, 'ppl', round(math.exp(-xsum / xcnt), 2), 'acc', round(xacc/xcnt*100, 2))

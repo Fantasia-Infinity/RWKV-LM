@@ -55,6 +55,7 @@ class RWKV_TOKENIZER():
     good: list[set[int]]
     wlen: list[int]
     def __init__(self, file_name):
+        # 在此初始化 tokenizer 并加载词表文件
         self.idx2token = {}
         sorted = [] # must be already sorted
         lines = open(file_name, "r", encoding="utf-8").readlines()
@@ -110,6 +111,7 @@ class RWKV_TOKENIZER():
         return b''.join(map(lambda i: self.idx2token[i], tokens))
 
     def encode(self, src: str):
+        # 将字符串转换为 token 列表
         return self.encodeBytes(src.encode("utf-8"))
 
     def decode(self, tokens):
@@ -168,6 +170,7 @@ if USE_CUDA_KERNEL:
 else:
 
     def RWKV7_OP(r, w, k, v, a, b):
+        # 该函数实现 RWKV 的核心时序混合运算
         B, T, C = r.size()
         H = C // HEAD_SIZE
         N = HEAD_SIZE
@@ -255,6 +258,7 @@ class RWKV_Tmix_x070(MyModule):
 
     @MyFunction
     def forward(self, x, v_first):
+        # 实现时序混合逻辑，处理输入 x 并返回输出和初始 v_first
         B, T, C = x.size()
         H = self.n_head
         xx = self.time_shift(x) - x
@@ -307,6 +311,7 @@ class RWKV_CMix_x070(MyModule):
 
     @MyFunction
     def forward(self, x):
+        # 实现通道混合逻辑，对 x 进行变换
         xx = self.time_shift(x) - x
         
         k = x + xx * self.x_k
@@ -359,7 +364,7 @@ class RWKV(nn.Module):
         self.head = nn.Linear(args.n_embd, args.vocab_size, bias=False)
 
     def forward(self, idx):
-
+        # 主推理函数：将输入索引转换为模型输出
         x = self.emb(idx)
 
         v_first = torch.empty_like(x)
@@ -378,13 +383,14 @@ class RWKV(nn.Module):
 model_params = torch.load(MODEL_PATH, map_location="cpu")
 
 with torch.no_grad():
-
+    # 以下部分加载模型权重并进行推理演示
     model = RWKV(args).to(dtype=DTYPE).cuda()
     model.load_state_dict(model_params, strict=False) # we will ignore blocks.0.att.v0/v1/v2
 
     ########################################################################################################
 
     prompt = "The Eiffel tower is in the city of"
+    # 通过 tokenizer.encode() 将 prompt 转为 token 并使用模型 forward 输出
     input = tokenizer.encode(prompt)
     print(f'\nInput:\n{input}')
 
